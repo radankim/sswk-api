@@ -1,11 +1,14 @@
 export default async function handler(request, response) {
+  // 1. Vercel 환경변수에 저장한 인증키 (BIZ_KEY)
   const authkey = process.env.BIZ_KEY;
-  
-  // [수정됨] 인증키에 있는 특수문자(+, = 등)가 깨지지 않도록 'encodeURIComponent'로 감싸줍니다.
-  const encodedKey = encodeURIComponent(authkey);
+  const encodedKey = encodeURIComponent(authkey); // 특수문자 방지
 
-  // 기업마당 API 주소 (JSON 요청)
-  const apiUrl = `https://www.bizinfo.go.kr/uss/rss/bizinfoApi.do?crtfcKey=${encodedKey}&dataType=json&searchCnt=6`;
+  // [수정됨] 공공데이터 포털 통합 API 주소 사용
+  const API_ID = '15077093'; // 중소벤처기업부_중소기업지원사업목록 서비스 ID
+  const ENDPOINT = 'file-data-list'; // 목록 API
+  
+  // page=1, perPage=10 (10개 노출), returnType=JSON
+  const apiUrl = `https://api.odcloud.kr/api/${API_ID}/v1/${ENDPOINT}?serviceKey=${encodedKey}&page=1&perPage=10&returnType=JSON`;
 
   response.setHeader('Access-Control-Allow-Credentials', true);
   response.setHeader('Access-Control-Allow-Origin', '*');
@@ -15,40 +18,44 @@ export default async function handler(request, response) {
     const res = await fetch(apiUrl);
     const rawData = await res.json();
     
-    // 데이터 확인 (디버깅용)
-    console.log("API Response:", JSON.stringify(rawData).substring(0, 200));
+    // 2. 데이터 구조 확인 및 추출
+    // odcloud.kr API는 보통 {data: [...]} 구조를 반환합니다.
+    const rawItems = rawData.data || []; 
 
-    // 데이터가 없는 경우
-    if (!rawData || !rawData.jsonArray || rawData.jsonArray.length === 0) {
+    if (rawItems.length === 0) {
        return response.status(200).json({ status: 'empty', data: [] });
     }
 
-    const cleanData = rawData.jsonArray.map(item => {
+    // 3. 데이터 가공 (필요한 정보만 추출하고 D-Day 계산)
+    const cleanData = rawItems.map(item => {
       let dDayTag = "상시";
       let dDayClass = "always"; 
-
-      if (item.reqstEndDe) {
+      
+      // 마감일 필드 (서비스마다 이름이 다를 수 있어 필드명 보정)
+      const endDate = item.pblancClosDe || item['공고마감일'] || item.reqstEndDe; 
+      
+      if (endDate) { 
         const today = new Date();
         today.setHours(0,0,0,0);
-        const endDate = new Date(item.reqstEndDe);
-        const diffTime = endDate - today;
+        const deadlineDate = new Date(endDate);
+        const diffTime = deadlineDate - today;
         const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
 
         if (diffDays < 0) { dDayTag = "마감"; dDayClass = "closed"; }
         else if (diffDays === 0) { dDayTag = "오늘마감"; dDayClass = "danger"; }
         else {
             dDayTag = `D-${diffDays}`;
-            if(diffDays <= 7) dDayClass = "warning";
-            else dDayClass = "safe";
+            dDayClass = diffDays <= 7 ? "warning" : "safe";
         }
       }
 
       return {
-        title: item.pblancNm,
-        category: item.pldirSportRealmMnm,
-        org: item.excInsttNm || item.jrsdInsttNm,
-        url: "https://www.bizinfo.go.kr" + item.pblancUrl,
-        endDate: item.reqstEndDe,
+        // [필드명 보정] API 문서에 따르면 아래와 같을 확률이 높습니다.
+        title: item.pblancNm || item['사업명'],
+        category: item.pldirSportRealmMnm || item['지원분야'], 
+        org: item.excInsttNm || item['수행기관명'] || item['소관기관'],
+        url: item.pblancUrl || item['상세URL'], // 상세 URL은 API에서 완전한 주소를 주지 않을 수 있음
+        endDate: endDate,
         dDay: dDayTag,
         dDayClass: dDayClass
       };
@@ -57,7 +64,7 @@ export default async function handler(request, response) {
     response.status(200).json({ status: 'success', data: cleanData });
 
   } catch (error) {
-    console.error("Server Error:", error);
-    response.status(500).json({ error: '데이터 처리 중 오류 발생' });
+    console.error("API Error:", error);
+    response.status(500).json({ error: '정부 데이터 연동 실패', details: error.message });
   }
 }
