@@ -1,10 +1,7 @@
 export default async function handler(request, response) {
-  // 1. Vercel 환경변수에 저장한 인증키 (BIZ_KEY)
   const authkey = process.env.BIZ_KEY;
-
-  // 2. 기업마당(중소벤처기업부) 실시간 API 호출
-  // json 데이터로 요청, 최신순 20개
-  const apiUrl = `https://www.bizinfo.go.kr/uss/rss/bizinfoApi.do?crtfcKey=${authkey}&dataType=json&searchCnt=20`;
+  // JSON 데이터 요청
+  const apiUrl = `https://www.bizinfo.go.kr/uss/rss/bizinfoApi.do?crtfcKey=${authkey}&dataType=json&searchCnt=5`;
 
   response.setHeader('Access-Control-Allow-Credentials', true);
   response.setHeader('Access-Control-Allow-Origin', '*');
@@ -12,16 +9,40 @@ export default async function handler(request, response) {
 
   try {
     const res = await fetch(apiUrl);
-    const rawData = await res.json();
+    const textData = await res.text(); // 일단 글자로 받음 (에러면 XML로 오기 때문)
 
-    // 데이터가 비어있을 경우 처리
-    if (!rawData || !rawData.jsonArray || rawData.jsonArray.length === 0) {
-       return response.status(200).json({ status: 'empty', data: [] });
+    // 1. 만약 에러 메시지(SERVICE_KEY_IS_NOT_REGISTERED 등)가 포함되어 있다면?
+    if (textData.includes('SERVICE_KEY_IS_NOT_REGISTERED') || textData.includes('REGISTERED')) {
+        return response.status(200).json({ 
+            status: 'error', 
+            message: '⛔ 인증키가 아직 서버에 등록되지 않았습니다. (1시간 뒤 재시도 필요)',
+            raw: textData 
+        });
     }
 
-    // 3. 필요한 데이터만 정제 (Mapping)
+    // 2. 정상 JSON인지 파싱 시도
+    let rawData;
+    try {
+        rawData = JSON.parse(textData);
+    } catch (e) {
+        return response.status(200).json({ 
+            status: 'error', 
+            message: '⛔ 데이터 형식이 올바르지 않습니다. (키 오류 가능성)',
+            raw: textData 
+        });
+    }
+    
+    // 3. 데이터가 없는 경우
+    if (!rawData || !rawData.jsonArray || rawData.jsonArray.length === 0) {
+       return response.status(200).json({ 
+           status: 'empty', 
+           message: '데이터가 비어있습니다.',
+           raw: rawData 
+       });
+    }
+
+    // 4. 정상 데이터 가공
     const cleanData = rawData.jsonArray.map(item => {
-      // D-Day 계산
       let dDayTag = "상시";
       let dDayClass = "always"; 
 
@@ -41,11 +62,11 @@ export default async function handler(request, response) {
       }
 
       return {
-        title: item.pblancNm,          // 공고명
-        category: item.pldirSportRealmMnm, // 지원분야 (금융, 기술 등)
-        org: item.excInsttNm || item.jrsdInsttNm, // 소관기관
-        url: "https://www.bizinfo.go.kr" + item.pblancUrl, // 상세 링크 (상대경로일 경우 대비)
-        endDate: item.reqstEndDe,      // 마감일
+        title: item.pblancNm,
+        category: item.pldirSportRealmMnm,
+        org: item.excInsttNm || item.jrsdInsttNm,
+        url: "https://www.bizinfo.go.kr" + item.pblancUrl,
+        endDate: item.reqstEndDe,
         dDay: dDayTag,
         dDayClass: dDayClass
       };
@@ -54,7 +75,6 @@ export default async function handler(request, response) {
     response.status(200).json({ status: 'success', data: cleanData });
 
   } catch (error) {
-    console.error("API Error:", error);
-    response.status(500).json({ error: '데이터 연동 실패' });
+    response.status(500).json({ error: '서버 내부 오류', details: error.message });
   }
 }
