@@ -8,8 +8,7 @@ export default async function handler(request, response) {
   const searchDate = `${year}${month}${day}`;
 
   try {
-    const apiUrl = `https://www.koreaexim.go.kr/site/program/financial/exchangeJSON?authkey=${authkey}&searchdate=${searchDate}&data=AP01`;
-    
+    const apiUrl = `https://oapi.koreaexim.go.kr/site/program/financial/exchangeJSON?authkey=${authkey}&searchdate=${searchDate}&data=AP01`;    
     const res = await fetch(apiUrl);
     const data = await res.json();
 
