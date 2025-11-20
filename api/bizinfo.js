@@ -1,7 +1,11 @@
 export default async function handler(request, response) {
   const authkey = process.env.BIZ_KEY;
-  // JSON 데이터 요청
-  const apiUrl = `https://www.bizinfo.go.kr/uss/rss/bizinfoApi.do?crtfcKey=${authkey}&dataType=json&searchCnt=5`;
+  
+  // [수정됨] 인증키에 있는 특수문자(+, = 등)가 깨지지 않도록 'encodeURIComponent'로 감싸줍니다.
+  const encodedKey = encodeURIComponent(authkey);
+
+  // 기업마당 API 주소 (JSON 요청)
+  const apiUrl = `https://www.bizinfo.go.kr/uss/rss/bizinfoApi.do?crtfcKey=${encodedKey}&dataType=json&searchCnt=6`;
 
   response.setHeader('Access-Control-Allow-Credentials', true);
   response.setHeader('Access-Control-Allow-Origin', '*');
@@ -9,39 +13,16 @@ export default async function handler(request, response) {
 
   try {
     const res = await fetch(apiUrl);
-    const textData = await res.text(); // 일단 글자로 받음 (에러면 XML로 오기 때문)
-
-    // 1. 만약 에러 메시지(SERVICE_KEY_IS_NOT_REGISTERED 등)가 포함되어 있다면?
-    if (textData.includes('SERVICE_KEY_IS_NOT_REGISTERED') || textData.includes('REGISTERED')) {
-        return response.status(200).json({ 
-            status: 'error', 
-            message: '⛔ 인증키가 아직 서버에 등록되지 않았습니다. (1시간 뒤 재시도 필요)',
-            raw: textData 
-        });
-    }
-
-    // 2. 정상 JSON인지 파싱 시도
-    let rawData;
-    try {
-        rawData = JSON.parse(textData);
-    } catch (e) {
-        return response.status(200).json({ 
-            status: 'error', 
-            message: '⛔ 데이터 형식이 올바르지 않습니다. (키 오류 가능성)',
-            raw: textData 
-        });
-    }
+    const rawData = await res.json();
     
-    // 3. 데이터가 없는 경우
+    // 데이터 확인 (디버깅용)
+    console.log("API Response:", JSON.stringify(rawData).substring(0, 200));
+
+    // 데이터가 없는 경우
     if (!rawData || !rawData.jsonArray || rawData.jsonArray.length === 0) {
-       return response.status(200).json({ 
-           status: 'empty', 
-           message: '데이터가 비어있습니다.',
-           raw: rawData 
-       });
+       return response.status(200).json({ status: 'empty', data: [] });
     }
 
-    // 4. 정상 데이터 가공
     const cleanData = rawData.jsonArray.map(item => {
       let dDayTag = "상시";
       let dDayClass = "always"; 
@@ -57,7 +38,8 @@ export default async function handler(request, response) {
         else if (diffDays === 0) { dDayTag = "오늘마감"; dDayClass = "danger"; }
         else {
             dDayTag = `D-${diffDays}`;
-            dDayClass = diffDays <= 7 ? "warning" : "safe";
+            if(diffDays <= 7) dDayClass = "warning";
+            else dDayClass = "safe";
         }
       }
 
@@ -75,6 +57,7 @@ export default async function handler(request, response) {
     response.status(200).json({ status: 'success', data: cleanData });
 
   } catch (error) {
-    response.status(500).json({ error: '서버 내부 오류', details: error.message });
+    console.error("Server Error:", error);
+    response.status(500).json({ error: '데이터 처리 중 오류 발생' });
   }
 }
