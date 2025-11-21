@@ -42,7 +42,7 @@ export default async function handler(req, res) {
 
     // 공통 파라미터 세팅
     const params = new URLSearchParams({
-      serviceKey: apiKey,          // 🔹 Decoding 키 그대로 넣기 (URLSearchParams가 인코딩 처리)
+      ServiceKey: apiKey,          // 🔹 Decoding 키 그대로 넣기 (URLSearchParams가 인코딩 처리)
       page: String(page),
       perPage: String(perPage),
       returnType: "json",
