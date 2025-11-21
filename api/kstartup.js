@@ -1,22 +1,34 @@
 // /api/kstartup.js
-// K-Startup API Proxy (Pure JSON/XML Auto Parser + Full CORS)
+// K-Startup API Proxy (JSON 전용 + CORS + 간단 캐싱)
+
+const cacheStore = new Map(); // URL별 캐시 { data, ts }
+
+function getCache(key, ttlMs) {
+  const hit = cacheStore.get(key);
+  if (!hit) return null;
+  if (Date.now() - hit.ts > ttlMs) {
+    cacheStore.delete(key);
+    return null;
+  }
+  return hit.data;
+}
+
+function setCache(key, data) {
+  cacheStore.set(key, { data, ts: Date.now() });
+}
 
 export default async function handler(req, res) {
-  /* =====================================================
-     🔵 CORS 설정 (브라우저 요청 허용)
-  ===================================================== */
+  /* ============================
+     🔵 CORS 설정
+  ============================ */
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 
-  // 브라우저 사전 요청(OPTIONS) 처리
   if (req.method === "OPTIONS") {
     return res.status(200).end();
   }
 
-  /* =====================================================
-     🔵 본 로직 시작
-  ===================================================== */
   try {
     const apiKey = process.env.KSTARTUP_KEY;
     if (!apiKey) {
@@ -25,7 +37,6 @@ export default async function handler(req, res) {
       });
     }
 
-    // Query parsing
     const {
       type = "announcement",
       page = "1",
@@ -41,10 +52,9 @@ export default async function handler(req, res) {
     };
 
     const endpoint = endpointMap[type];
-
     if (!endpoint) {
       return res.status(400).json({
-        error: "Invalid type. Must use announcement | business | content | stat",
+        error: "Invalid type. Use: announcement | business | content | stat",
       });
     }
 
@@ -58,19 +68,33 @@ export default async function handler(req, res) {
       returnType: "json",
     });
 
-    // 유저 필터 자동 추가
-    Object.entries(filters).forEach(([k, v]) => {
-      if (v !== undefined && v !== "") {
-        params.append(k, String(v));
+    // 추가 필터 (지역, 분야, 공고명 등)
+    Object.entries(filters).forEach(([key, value]) => {
+      if (value !== undefined && value !== "") {
+        params.append(key, String(value));
       }
     });
 
     const url = `${baseUrl}/${endpoint}?${params.toString()}`;
     console.log("[K-Startup] Request URL:", url);
 
-    /* =====================================================
-       🔵 Upstream API 호출
-    ===================================================== */
+    /* ============================
+       🔵 캐시 체크
+    ============================ */
+    const cacheKey = url;
+    const ttlMs =
+      type === "announcement" || type === "business"
+        ? 60 * 1000 // 공고/사업: 1분 캐시
+        : 10 * 60 * 1000; // 콘텐츠/통계: 10분 캐시
+
+    const cached = getCache(cacheKey, ttlMs);
+    if (cached) {
+      return res.status(200).json(cached);
+    }
+
+    /* ============================
+       🔵 Upstream 호출
+    ============================ */
     const upstreamRes = await fetch(url);
     const raw = await upstreamRes.text();
 
@@ -82,66 +106,20 @@ export default async function handler(req, res) {
       });
     }
 
-    /* =====================================================
-       🔵 JSON인지 먼저 검사
-    ===================================================== */
+    // JSON 파싱 시도
+    let json;
     try {
-      const json = JSON.parse(raw);
-      return res.status(200).json(json);
+      json = JSON.parse(raw);
     } catch (e) {
-      console.log("[K-Startup] JSON Parse Fail → XML detected");
+      console.error("[K-Startup] JSON parse failed, raw return");
+      // 혹시 JSON이 아니면 원문 그대로 전달
+      return res.status(200).send(raw);
     }
 
-    /* =====================================================
-       🔵 XML → JSON (순수 JS)
-    ===================================================== */
-    function xmlToJson(xml) {
-      const parser = new DOMParser();
-      const dom = parser.parseFromString(xml, "text/xml");
+    // 캐시에 저장
+    setCache(cacheKey, json);
 
-      function traverse(node) {
-        const obj = {};
-
-        // element
-        if (node.nodeType === 1) {
-          if (node.attributes.length > 0) {
-            obj["@attributes"] = {};
-            for (let attr of node.attributes) {
-              obj["@attributes"][attr.nodeName] = attr.nodeValue;
-            }
-          }
-        }
-        // text
-        else if (node.nodeType === 3) {
-          const trimmed = node.nodeValue.trim();
-          if (trimmed) return trimmed;
-        }
-
-        // child nodes
-        for (let child of node.childNodes) {
-          const childObj = traverse(child);
-          if (!childObj) continue;
-
-          const name = child.nodeName;
-          if (obj[name] === undefined) {
-            obj[name] = childObj;
-          } else {
-            if (!Array.isArray(obj[name])) {
-              obj[name] = [obj[name]];
-            }
-            obj[name].push(childObj);
-          }
-        }
-
-        return obj;
-      }
-
-      return traverse(dom);
-    }
-
-    const xmlJson = xmlToJson(raw);
-    return res.status(200).json(xmlJson);
-
+    return res.status(200).json(json);
   } catch (err) {
     console.error("K-Startup Proxy Fatal Error:", err);
     return res.status(500).json({
