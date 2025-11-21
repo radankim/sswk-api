@@ -1,10 +1,9 @@
 export default async function handler(request, response) {
   const authkey = process.env.BIZ_KEY;
-  const encodedKey = encodeURIComponent(authkey);
 
   const API_URL =
-    `https://api.odcloud.kr/api/15077093/v1/uddi:8e556f68-3af0-4c5d-9d1e-a25f75b1a4a8` +
-    `?serviceKey=${encodedKey}&page=1&perPage=50&returnType=JSON`;
+    `https://api.odcloud.kr/api/15077093/v1/uddi:b6a97856-ac9b-4eac-92a8-48e8988e8880` +
+    `?serviceKey=${authkey}&page=1&perPage=50&returnType=JSON`;
 
   response.setHeader("Access-Control-Allow-Origin", "*");
   response.setHeader("Access-Control-Allow-Methods", "GET,OPTIONS");
@@ -22,11 +21,10 @@ export default async function handler(request, response) {
 
     const cleanData = raw.data
       .map((item) => {
-        const startDate = item["공고시작일자"];
         const endDate = item["공고마감일자"];
+        const title = item["사업명"];
         const org = item["수행기관명"] || item["소관기관"];
         const url = item["상세URL"];
-        const title = item["사업명"];
         const category = item["지원분야"] || "기타";
 
         // D-day 계산
@@ -59,12 +57,7 @@ export default async function handler(request, response) {
           dDayClass,
         };
       })
-      // 최근 공고 → 마감 임박 순 정렬
-      .sort((a, b) => {
-        if (!a.endDate) return 1;
-        if (!b.endDate) return -1;
-        return new Date(a.endDate) - new Date(b.endDate);
-      });
+      .sort((a, b) => new Date(a.endDate) - new Date(b.endDate));
 
     response.status(200).json({ status: "success", data: cleanData });
   } catch (err) {
