@@ -1,7 +1,22 @@
 // /api/kstartup.js
-// K-Startup API Proxy (No xml2js, Pure XML Parser version)
+// K-Startup API Proxy (Pure JSON/XML Auto Parser + Full CORS)
 
 export default async function handler(req, res) {
+  /* =====================================================
+     🔵 CORS 설정 (브라우저 요청 허용)
+  ===================================================== */
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+
+  // 브라우저 사전 요청(OPTIONS) 처리
+  if (req.method === "OPTIONS") {
+    return res.status(200).end();
+  }
+
+  /* =====================================================
+     🔵 본 로직 시작
+  ===================================================== */
   try {
     const apiKey = process.env.KSTARTUP_KEY;
     if (!apiKey) {
@@ -10,6 +25,7 @@ export default async function handler(req, res) {
       });
     }
 
+    // Query parsing
     const {
       type = "announcement",
       page = "1",
@@ -25,9 +41,10 @@ export default async function handler(req, res) {
     };
 
     const endpoint = endpointMap[type];
+
     if (!endpoint) {
       return res.status(400).json({
-        error: "Invalid type. Use announcement | business | content | stat ",
+        error: "Invalid type. Must use announcement | business | content | stat",
       });
     }
 
@@ -41,16 +58,19 @@ export default async function handler(req, res) {
       returnType: "json",
     });
 
-    Object.entries(filters).forEach(([key, value]) => {
-      if (value !== undefined && value !== "") {
-        params.append(key, String(value));
+    // 유저 필터 자동 추가
+    Object.entries(filters).forEach(([k, v]) => {
+      if (v !== undefined && v !== "") {
+        params.append(k, String(v));
       }
     });
 
     const url = `${baseUrl}/${endpoint}?${params.toString()}`;
     console.log("[K-Startup] Request URL:", url);
 
-    // Upstream API 호출
+    /* =====================================================
+       🔵 Upstream API 호출
+    ===================================================== */
     const upstreamRes = await fetch(url);
     const raw = await upstreamRes.text();
 
@@ -62,36 +82,42 @@ export default async function handler(req, res) {
       });
     }
 
-    // 1) JSON인지 먼저 확인
+    /* =====================================================
+       🔵 JSON인지 먼저 검사
+    ===================================================== */
     try {
       const json = JSON.parse(raw);
       return res.status(200).json(json);
-    } catch (_) {
-      // JSON이 아니면 XML로 판단
+    } catch (e) {
       console.log("[K-Startup] JSON Parse Fail → XML detected");
     }
 
-    // 2) XML → JSON (Pure JS Parser)
+    /* =====================================================
+       🔵 XML → JSON (순수 JS)
+    ===================================================== */
     function xmlToJson(xml) {
       const parser = new DOMParser();
       const dom = parser.parseFromString(xml, "text/xml");
 
       function traverse(node) {
         const obj = {};
+
+        // element
         if (node.nodeType === 1) {
-          // element
           if (node.attributes.length > 0) {
             obj["@attributes"] = {};
             for (let attr of node.attributes) {
               obj["@attributes"][attr.nodeName] = attr.nodeValue;
             }
           }
-        } else if (node.nodeType === 3) {
-          // text
+        }
+        // text
+        else if (node.nodeType === 3) {
           const trimmed = node.nodeValue.trim();
           if (trimmed) return trimmed;
         }
 
+        // child nodes
         for (let child of node.childNodes) {
           const childObj = traverse(child);
           if (!childObj) continue;
@@ -100,13 +126,13 @@ export default async function handler(req, res) {
           if (obj[name] === undefined) {
             obj[name] = childObj;
           } else {
-            // 여러 개이면 배열로
             if (!Array.isArray(obj[name])) {
               obj[name] = [obj[name]];
             }
             obj[name].push(childObj);
           }
         }
+
         return obj;
       }
 
@@ -115,6 +141,7 @@ export default async function handler(req, res) {
 
     const xmlJson = xmlToJson(raw);
     return res.status(200).json(xmlJson);
+
   } catch (err) {
     console.error("K-Startup Proxy Fatal Error:", err);
     return res.status(500).json({
