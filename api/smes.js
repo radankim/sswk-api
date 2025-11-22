@@ -80,6 +80,13 @@ export default async function handler(req, res) {
     const upstreamRes = await fetch(url);
     const raw = await upstreamRes.text();
 
+    // 👇👇 [DEBUG LOG 추가] 👇👇
+    console.log("========================================");
+    console.log("[SMES API RAW DATA] 데이터 확인 시작");
+    console.log(raw.substring(0, 500)); // 에러 코드가 여기에 담겨있습니다.
+    console.log("========================================");
+    // 👆👆 [DEBUG LOG 끝] 👆👆
+
     if (!upstreamRes.ok) {
       // API 응답 코드가 200이 아닌 경우
       return res.status(upstreamRes.status).json({
