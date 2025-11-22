@@ -20,8 +20,10 @@ function setCache(key, data) {
 // "20250101" 형식 -> Date
 function parseYmd(str) {
   if (!str) return null;
-  const m = String(str).match(/^(\d{4})(\d{2})(\d{2})$/);
+  // "2025-11-03" 도, 혹시 모를 "20251103" 도 모두 허용
+  const m = String(str).match(/^(\d{4})-?(\d{2})-?(\d{2})$/);
   if (!m) return null;
+
   return new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
 }
 
@@ -117,16 +119,18 @@ export default async function handler(req, res) {
       const oneYearAgo = new Date(today);
       oneYearAgo.setFullYear(oneYearAgo.getFullYear() - 1);
 
-      items = allItems.filter((item) => {
-        const s = parseYmd(item.pblancBgnDt);
-        const e = parseYmd(item.pblancEndDt);
+items = allItems.filter((item) => {
+  const s = parseYmd(item.pblancBgnDt);
+  const e = parseYmd(item.pblancEndDt);
 
-        const recentStart = s && s >= oneYearAgo;
-        const recentEnd = e && e >= oneYearAgo;
+  // 둘 다 없으면 그냥 포함시킴 (필요하면 나중에 규칙 조정)
+  if (!s && !e) return true;
 
-        // 날짜가 비어있거나 이상하면 기본적으로 제외
-        return recentStart || recentEnd;
-      });
+  const recentStart = s && s >= oneYearAgo;
+  const recentEnd  = e && e >= oneYearAgo;
+
+  return recentStart || recentEnd;
+});
     }
 
     // ✅ 캐시된 원본은 건드리지 않고, 응답용 객체만 새로 만듦
