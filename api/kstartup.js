@@ -97,7 +97,14 @@ export default async function handler(req, res) {
     ============================ */
     const upstreamRes = await fetch(url);
     const raw = await upstreamRes.text();
-
+    
+// 👇👇 [여기부터] 이 코드를 추가해 주세요 👇👇
+    console.log("========================================");
+    console.log("[API RAW DATA Check] 데이터 확인 시작");
+    console.log(raw.substring(0, 2000)); // 데이터가 너무 길 수 있어서 앞부분 2000자만 로그에 찍습니다.
+    console.log("========================================");
+    // 👆👆 [여기까지] 추가해 주세요 👆👆
+    
     if (!upstreamRes.ok) {
       return res.status(upstreamRes.status).json({
         error: "Upstream API error",
