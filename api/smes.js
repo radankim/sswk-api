@@ -1,45 +1,146 @@
-export default async function handler(req, res) {
-  // ...
-  const apiKey = process.env.SMES_KEY;
+// /api/smes.js
+// 중소벤처24 공고 정보 API Proxy (JSON 전용 + CORS + 간단 캐싱 + 기간 필터링)
 
-  const {
-    strDt,
-    endDt,
-    html = "no",
-    range,              // ✅ 추가
-  } = req.query;
+const cacheStore = new Map(); // URL별 캐시 { data, ts }
 
-  const baseUrl = "https://www.smes.go.kr/fnct/apiReqst/extPblancInfo";
-
-  const params = new URLSearchParams({
-    token: apiKey,
-    html: String(html),
-  });
-
-  // ✅ range=all 이 아니면 기본적으로 "최근 1년" 같은 기간 제한 걸기
-  if (range !== "all") {
-    const today = new Date();
-    const endDefault = formatYmd(today);
-
-    const start = new Date(today);
-    start.setFullYear(start.getFullYear() - 1); // 최근 1년
-    const startDefault = formatYmd(start);
-
-    params.append("strDt", String(strDt || startDefault));
-    params.append("endDt", String(endDt || endDefault));
-  } else {
-    // 상시모집 버튼 모드에서는 기간 제한 없이 전체 조회
-    if (strDt) params.append("strDt", String(strDt));
-    if (endDt) params.append("endDt", String(endDt));
+function getCache(key, ttlMs) {
+  const hit = cacheStore.get(key);
+  if (!hit) return null;
+  if (Date.now() - hit.ts > ttlMs) {
+    cacheStore.delete(key);
+    return null;
   }
-
-  const url = `${baseUrl}?${params.toString()}`;
-  // 이하 로직은 그대로...
+  return hit.data;
 }
 
-function formatYmd(d) {
-  const yyyy = d.getFullYear();
-  const mm = String(d.getMonth() + 1).padStart(2, "0");
-  const dd = String(d.getDate()).padStart(2, "0");
-  return `${yyyy}${mm}${dd}`;
+function setCache(key, data) {
+  cacheStore.set(key, { data, ts: Date.now() });
+}
+
+// "20250101" 형식 -> Date
+function parseYmd(str) {
+  if (!str) return null;
+  const m = String(str).match(/^(\d{4})(\d{2})(\d{2})$/);
+  if (!m) return null;
+  return new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+}
+
+export default async function handler(req, res) {
+  // =======================
+  // CORS
+  // =======================
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+
+  if (req.method === "OPTIONS") {
+    return res.status(200).end();
+  }
+
+  try {
+    const apiKey = process.env.SMES_KEY;
+    if (!apiKey) {
+      return res.status(500).json({
+        error: "SMES_KEY is not set. Please check Vercel environment variables.",
+      });
+    }
+
+    // range: "all" | (기타)  → 기본은 최근 1년 뷰
+    const { html = "no", range = "recent" } = req.query;
+
+    const baseUrl =
+      "https://www.smes.go.kr/fnct/apiReqst/extPblancInfo";
+
+    // ✅ SMES 쪽에는 날짜 파라미터 안 보냄 (기존처럼 token + html만)
+    const params = new URLSearchParams({
+      token: apiKey,
+      html: String(html),
+    });
+
+    const url = `${baseUrl}?${params.toString()}`;
+    console.log("[SMES] Request URL:", url);
+
+    // =======================
+    // 캐시 체크
+    // =======================
+    const ttlMs = 30 * 60 * 1000; // 30분
+    const cached = getCache(url, ttlMs);
+
+    let baseJson;
+
+    if (cached) {
+      baseJson = cached;
+    } else {
+      const upstreamRes = await fetch(url);
+      const raw = await upstreamRes.text();
+
+      console.log("========================================");
+      console.log("[SMES API RAW DATA] 데이터 확인 시작");
+      console.log(raw.substring(0, 500));
+      console.log("========================================");
+
+      if (!upstreamRes.ok) {
+        return res.status(upstreamRes.status).json({
+          error: "Upstream API error",
+          status: upstreamRes.status,
+          raw,
+        });
+      }
+
+      try {
+        baseJson = JSON.parse(raw);
+      } catch (e) {
+        console.error("[SMES] JSON parse failed, returning raw text.");
+        return res.status(200).send(raw);
+      }
+
+      // 원본 전체 데이터를 캐시에 저장 (range와 무관하게)
+      setCache(url, baseJson);
+    }
+
+    // 혹시 resultCd 자체가 에러면 그대로 전달
+    if (baseJson.resultCd && baseJson.resultCd !== "0") {
+      return res.status(200).json(baseJson);
+    }
+
+    const allItems = Array.isArray(baseJson.data) ? baseJson.data : [];
+
+    let items = allItems;
+
+    // =======================
+    // 기간 필터링 (우리 서버 내부 로직)
+    // =======================
+    if (range !== "all") {
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+
+      const oneYearAgo = new Date(today);
+      oneYearAgo.setFullYear(oneYearAgo.getFullYear() - 1);
+
+      items = allItems.filter((item) => {
+        const s = parseYmd(item.pblancBgnDt);
+        const e = parseYmd(item.pblancEndDt);
+
+        const recentStart = s && s >= oneYearAgo;
+        const recentEnd = e && e >= oneYearAgo;
+
+        // 날짜가 비어있거나 이상하면 기본적으로 제외
+        return recentStart || recentEnd;
+      });
+    }
+
+    // ✅ 캐시된 원본은 건드리지 않고, 응답용 객체만 새로 만듦
+    const responseJson = {
+      ...baseJson,
+      data: items,
+    };
+
+    return res.status(200).json(responseJson);
+  } catch (err) {
+    console.error("SMES Proxy Fatal Error:", err);
+    return res.status(500).json({
+      error: "Internal server error",
+      detail: err.message,
+    });
+  }
 }
