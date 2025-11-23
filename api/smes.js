@@ -91,19 +91,24 @@ function getStatus(item) {
   return "ongoing";
 }
 
-// =======================
-// 리스트 응답용 "다이어트": 무거운 필드 제거
-// =======================
+// ✅ 리스트 응답용 "다이어트": 필요한 필드만 선별
 function stripHeavyFields(item) {
-  // 리스트에서 사용하지 않는, 용량 큰 필드들만 골라 제거
-  const {
-    pblancCn,      // 공고 본문 텍스트/HTML
-    pblancCnHtml,  // 혹시 HTML 버전 필드가 있다면
-    // 필요 시 여기에 더 추가해서 잘라낼 수 있음
-    ...rest
-  } = item;
+  return {
+    // 프론트에서 실제로 사용하는 필드만 남김
+    pblancNm: item.pblancNm,           // 공고명
+    bizType: item.bizType,             // 분야
+    sportInsttNm: item.sportInsttNm,   // 주관/지원기관
 
-  return rest;
+    pblancBgnDt: item.pblancBgnDt,     // 시작일자
+    pblancEndDt: item.pblancEndDt,     // 마감일자
+
+    pblancDtlUrl: item.pblancDtlUrl,   // 상세보기 URL
+    reqstLinkInfo: item.reqstLinkInfo, // 기타 링크
+
+    // 추후 디테일 페이지용으로 쓸 수도 있는 식별자 정도만 추가
+    pblancSn: item.pblancSn,
+    pblancId: item.pblancId,
+  };
 }
 
 // =======================
