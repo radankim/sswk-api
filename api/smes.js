@@ -1,9 +1,32 @@
 // /api/smes.js
 // 중소벤처24 공고 정보 API Proxy
 // - CORS 허용
-// - Vercel CDN 캐싱 적용 (s-maxage=3600: 1시간 캐시)
+// - 30분 캐싱 (메모리 캐시 + 브라우저/엣지 캐시 힌트)
+// - 기본모드: 최근 1년 + 상시모집 제외
+// - 상시모집 모드: 상시모집 공고만
 
-// 날짜 파싱 유틸
+const cacheStore = new Map(); // URL별 캐시 { data, ts }
+
+// =======================
+// 간단 메모리 캐시 유틸
+// =======================
+function getCache(key, ttlMs) {
+  const hit = cacheStore.get(key);
+  if (!hit) return null;
+  if (Date.now() - hit.ts > ttlMs) {
+    cacheStore.delete(key);
+    return null;
+  }
+  return hit.data;
+}
+
+function setCache(key, data) {
+  cacheStore.set(key, { data, ts: Date.now() });
+}
+
+// =======================
+// 날짜 유틸 ("2025-11-03" 또는 "20251103")
+// =======================
 function parseYmdLike(str) {
   if (!str) return null;
   const m = String(str).match(/^(\d{4})-?(\d{2})-?(\d{2})$/);
@@ -15,32 +38,44 @@ function parseYmdLike(str) {
   return new Date(y, mth - 1, d);
 }
 
-// 상시모집 여부 판단
+// =======================
+// 상시모집 여부 판단 (백엔드 기준)
+// =======================
 function isAlwaysRecruit(item) {
   const title = (item.pblancNm || "").toLowerCase();
   const desc = (
-    (item.cn || "") + " " +
-    (item.rm || "") + " " +
-    (item.etc || "") + " " +
+    (item.cn || "") +
+    " " +
+    (item.rm || "") +
+    " " +
+    (item.etc || "") +
+    " " +
     (item.pblancCn || "")
   ).toLowerCase();
+
   const txt = title + " " + desc;
 
+  // ① 텍스트 키워드 기준
   const keywords = ["상시", "연중", "수시", "모집시까지", "접수시까지"];
   if (keywords.some((k) => txt.includes(k))) return true;
 
+  // ② 종료일 특수값 기준
   const noEndList = ["", null, "0000-00-00", "9999-12-31", "2999-12-31"];
   if (noEndList.includes(item.pblancEndDt)) return true;
 
+  // ③ 종료일이 너무 먼 미래인 경우 (옵션)
   const end = parseYmdLike(item.pblancEndDt);
   if (end) {
     const farFuture = new Date(2099, 0, 1);
     if (end >= farFuture) return true;
   }
+
   return false;
 }
 
-// 상태 계산
+// =======================
+// 상태 계산 (ongoing / upcoming / closed)
+// =======================
 function getStatus(item) {
   const today = new Date();
   today.setHours(0, 0, 0, 0);
@@ -56,16 +91,29 @@ function getStatus(item) {
   return "ongoing";
 }
 
+// =======================
+// 리스트 응답용 "다이어트": 무거운 필드 제거
+// =======================
+function stripHeavyFields(item) {
+  // 리스트에서 사용하지 않는, 용량 큰 필드들만 골라 제거
+  const {
+    pblancCn,      // 공고 본문 텍스트/HTML
+    pblancCnHtml,  // 혹시 HTML 버전 필드가 있다면
+    // 필요 시 여기에 더 추가해서 잘라낼 수 있음
+    ...rest
+  } = item;
+
+  return rest;
+}
+
+// =======================
+// 메인 핸들러
+// =======================
 export default async function handler(req, res) {
-  // 1. CORS 설정
+  // CORS
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-
-  // 2. ★ 핵심: Vercel CDN 캐싱 설정 (속도 개선의 키)
-  // s-maxage=3600: Vercel CDN이 1시간(3600초) 동안 데이터를 저장함 (사용자는 이 캐시된 데이터를 받음)
-  // stale-while-revalidate=59: 캐시 만료 후 요청이 오면 일단 옛날 데이터를 주고, 뒤에서 몰래 새 데이터를 갱신함
-  res.setHeader("Cache-Control", "s-maxage=3600, stale-while-revalidate=59");
 
   if (req.method === "OPTIONS") {
     return res.status(200).end();
@@ -74,42 +122,73 @@ export default async function handler(req, res) {
   try {
     const apiKey = process.env.SMES_KEY;
     if (!apiKey) {
-      return res.status(500).json({ error: "SMES_KEY missing" });
+      return res.status(500).json({
+        error: "SMES_KEY is not set. Please check Vercel environment variables.",
+      });
     }
 
+    // mode / range 파라미터로 동작 모드 분기
+    // - 기본: mode=default (또는 파라미터 없음)
+    // - 상시모집: mode=always 또는 range=always / range=all
     const { mode, range, html = "no" } = req.query;
-    const isAlwaysMode = mode === "always" || range === "always" || range === "all";
 
-    const baseUrl = "https://www.smes.go.kr/fnct/apiReqst/extPblancInfo";
-    const params = new URLSearchParams({ token: apiKey, html: String(html) });
+    const isAlwaysMode =
+      mode === "always" || range === "always" || range === "all";
+
+    const baseUrl =
+      "https://www.smes.go.kr/fnct/apiReqst/extPblancInfo";
+
+    // 날짜 필터는 SMES API에 직접 걸지 않음 (버그/에러 회피용)
+    const params = new URLSearchParams({
+      token: apiKey,
+      html: String(html),
+    });
+
     const upstreamUrl = `${baseUrl}?${params.toString()}`;
+    const ttlMs = 30 * 60 * 1000; // 30분 캐시
 
-    // 3. 외부 API 호출 (캐시 로직 제거, Vercel 헤더에 위임)
-    const upstreamRes = await fetch(upstreamUrl);
-    
-    if (!upstreamRes.ok) {
-      // 에러 발생 시 캐시하지 않도록 헤더 제거
-      res.removeHeader("Cache-Control"); 
-      return res.status(upstreamRes.status).json({ error: "Upstream API error" });
+    // =======================
+    // 메모리 캐시 조회
+    // =======================
+    let baseJson = getCache(upstreamUrl, ttlMs);
+
+    if (!baseJson) {
+      const upstreamRes = await fetch(upstreamUrl);
+      const raw = await upstreamRes.text();
+
+      console.log("========================================");
+      console.log("[SMES API RAW DATA] 일부 출력");
+      console.log(raw.substring(0, 300));
+      console.log("========================================");
+
+      if (!upstreamRes.ok) {
+        return res.status(upstreamRes.status).json({
+          error: "Upstream API error",
+          status: upstreamRes.status,
+          raw,
+        });
+      }
+
+      try {
+        baseJson = JSON.parse(raw);
+      } catch (e) {
+        console.error("[SMES] JSON parse failed, 반환 텍스트 그대로 전달");
+        return res.status(200).send(raw);
+      }
+
+      setCache(upstreamUrl, baseJson);
     }
 
-    const rawText = await upstreamRes.text();
-    let baseJson;
-    
-    try {
-      baseJson = JSON.parse(rawText);
-    } catch (e) {
-      // JSON 파싱 실패 시 원본 텍스트 반환
-      return res.status(200).send(rawText);
-    }
-
+    // 원본 에러코드는 그대로 전달
     if (baseJson.resultCd && baseJson.resultCd !== "0") {
       return res.status(200).json(baseJson);
     }
 
     const allItems = Array.isArray(baseJson.data) ? baseJson.data : [];
 
-    // 4. 데이터 필터링
+    // =======================
+    // 모드별 데이터 필터링
+    // =======================
     const today = new Date();
     today.setHours(0, 0, 0, 0);
     const oneYearAgo = new Date(today);
@@ -118,32 +197,55 @@ export default async function handler(req, res) {
     let items;
 
     if (isAlwaysMode) {
+      // 🔹 상시모집 모드: 상시모집 공고만
       items = allItems.filter((item) => isAlwaysRecruit(item));
     } else {
+      // 🔹 기본 모드: 최근 1년 + 상시모집 제외
       items = allItems.filter((item) => {
-        if (isAlwaysRecruit(item)) return false;
+        if (isAlwaysRecruit(item)) return false; // 상시 제외
+
         const s = parseYmdLike(item.pblancBgnDt);
         const e = parseYmdLike(item.pblancEndDt);
+
+        // 날짜 정보가 전혀 없으면 기본 모드에서는 제외
         if (!s && !e) return false;
+
         const recentStart = s && s >= oneYearAgo;
         const recentEnd = e && e >= oneYearAgo;
+
         return recentStart || recentEnd;
       });
     }
 
+    // 상태, 기타 파생 필드 추가 + 무거운 필드 제거
     const enriched = items.map((item) => ({
-      ...item,
+      ...stripHeavyFields(item),
       _status: getStatus(item),
     }));
 
-    // data만 교체하여 반환
-    const responseJson = { ...baseJson, data: enriched };
-    
-    return res.status(200).json(responseJson);
+    // 응답 JSON (불필요한 원본 data 구조는 유지하지 않고 최소 메타만 전달)
+    const responseJson = {
+      resultCd: baseJson.resultCd,
+      resultMsg: baseJson.resultMsg,
+      totalCount: enriched.length,
+      data: enriched,
+    };
 
+    // 브라우저 + Vercel 엣지 캐시 힌트
+    // - 브라우저: 5분
+    // - 엣지 캐시: 30분
+    // - stale-while-revalidate: 60초
+    res.setHeader(
+      "Cache-Control",
+      "public, max-age=300, s-maxage=1800, stale-while-revalidate=60"
+    );
+
+    return res.status(200).json(responseJson);
   } catch (err) {
-    console.error("Error:", err);
-    res.removeHeader("Cache-Control"); // 에러는 캐시하면 안 됨
-    return res.status(500).json({ error: "Internal server error", detail: err.message });
+    console.error("SMES Proxy Fatal Error:", err);
+    return res.status(500).json({
+      error: "Internal server error",
+      detail: err.message,
+    });
   }
 }
